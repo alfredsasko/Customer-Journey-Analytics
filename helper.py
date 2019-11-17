@@ -6,9 +6,12 @@ Module serves for custom methods to support Customer Journey Analytics Project
 # -------
 
 # Standard libraries
+import re
 import ipdb
 
 # 3rd party libraries
+from google.cloud import bigquery
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -269,3 +272,154 @@ def get_missmatch(**kws):
     missmatch_rows.name = 'missmatch_proportion'
 
     return cross_tab, missmatch_rows, total_missmatch
+
+def reconstruct_brand(product_sku, client, query_params):
+    '''Reconstructs brand from product name and brand variables
+    Args:
+        product_sku: product_sku as series of size (# transactions, 2)
+        client: Instatiated bigquery.Client to query distinct product
+                description(product_sku, product_name, product_brand,
+                product_brand_grp)
+        query_params: Query parameters for client
+
+    Returns:
+        recon_brand: reconstructed brand column as pandas dataframe
+                     of shape (# transactions, ['product_sku', 'recon_brand'])
+    '''
+
+    # Check arguments
+    # ----------------
+    assert isinstance(product_sku,  pd.Series)
+    assert isinstance(client, bigquery.Client)
+
+    # Query distinct products descriptions
+    # ------------------------------------
+    query='''
+    SELECT DISTINCT
+        hits_product.productSku AS product_sku,
+        hits_product.v2productName AS product_name,
+        hits_product.productBrand AS product_brand,
+        hits.contentGroup.contentGroup1 AS product_brand_grp
+    FROM
+        `bigquery-public-data.google_analytics_sample.ga_sessions_*`
+        LEFT JOIN UNNEST(hits) AS hits
+        LEFT JOIN UNNEST(hits.product) AS hits_product
+    WHERE
+        _TABLE_SUFFIX BETWEEN @start_date AND @end_date
+        AND hits_product.productSku IS NOT NULL
+    ORDER BY
+        product_sku
+    '''
+
+    job_config = bigquery.QueryJobConfig()
+    job_config.query_parameters = query_params
+    df = client.query(query, job_config=job_config).to_dataframe()
+
+
+    # predict brand name from product name for each sku
+    # -------------------------------------------------
+
+    # valid brands
+    brands = ['Android',
+              'Chrome',
+              r'\bGo\b',
+              'Google',
+              'Google Now',
+              'YouTube',
+              'Waze']
+
+    # concatenate different product names for each sku
+    brand_df = (df[['product_sku', 'product_name']]
+                .drop_duplicates()
+                .groupby('product_sku')
+                ['product_name']
+                .apply(lambda product_name: ' '.join(product_name))
+                .reset_index()
+                )
+
+    # drop (no set) sku's
+    brand_df = brand_df.drop(
+        index=brand_df.index[brand_df['product_sku'] == '(not set)'])
+
+
+    # predict brand name from product name for each sku
+    brand_df['recon_brand'] = (
+        brand_df['product_name']
+        .str.extract(r'({})'.format('|'.join(set(brands)),
+                     flags=re.IGNORECASE))
+    )
+
+    # adjust brand taking account spelling errors in product names
+    brand_df.loc[
+        brand_df['product_name'].str.contains('You Tube', case=False),
+        'recon_brand'
+    ] = 'YouTube'
+
+
+    # predict brand name from brand variables for sku's where
+    # brand couldn't be predected from product name
+    # --------------------------------------------------------
+
+    # get distinct product_sku and brand variables associations
+    brand_vars = ['product_brand', 'product_brand_grp']
+    brand_var = dict()
+    for brand in brand_vars:
+        brand_var[brand] = (df[['product_sku', brand]]
+                            .drop(index=df.index[(df['product_sku'] == '(not set)')
+                                                 | df['product_sku'].isna()
+                                                 | (df[brand] == '(not set)')
+                                                 | df[brand].isna()])
+                            .drop_duplicates()
+                            .drop_duplicates(subset='product_sku', keep=False))
+
+    # check for brand abiguity at sku level
+    old_brand = brand_var['product_brand'].set_index('product_sku')
+    new_brand = brand_var['product_brand_grp'].set_index('product_sku')
+    shared_sku = old_brand.index.intersection(new_brand.index)
+
+    if not shared_sku.empty:
+
+        # delete sku's with abigious brands
+        ambigious_sku = shared_sku[
+            old_brand[shared_sku].squeeze().values
+            != new_brand[shared_sku].squeeze().values
+        ]
+
+        old_brand = old_brand.drop(index=ambigious_sku, errors='ignore')
+        new_brand = new_brand.drop(index=ambigious_sku, errors='ignore')
+
+        # delete sku's with multiple brands in new_brand
+        multiple_sku = shared_sku[
+            old_brand[shared_sku].squeeze().values
+            == new_brand[shared_sku].squeeze().values
+        ]
+
+        new_brand = new_brand.drop(index=multiple_sku, errors='ignore')
+
+    # concatenate all associations of brand variables and product sku's
+    brand_var = pd.concat([old_brand.rename(columns={'product_brand':
+                                                     'recon_brand_var'}),
+                           new_brand.rename(columns={'product_brand_grp':
+                                                     'recon_brand_var'})])
+
+    # predict brand name from brand variables
+    brand_df.loc[brand_df['recon_brand'].isna(), 'recon_brand'] = (
+        pd.merge(brand_df['product_sku'], brand_var, on='product_sku', how='left')
+        ['recon_brand_var']
+    )
+
+    # recode remaining missing (not set) brands by Google brand
+    # ---------------------------------------------------------
+    brand_df['recon_brand'] = brand_df['recon_brand'].fillna('Google')
+
+    # predict brand from brand names and variables on transaction data
+    # ----------------------------------------------------------------
+    recon_brand = (pd.merge(product_sku.to_frame(),
+                           brand_df[['product_sku', 'recon_brand']],
+                           on='product_sku',
+                           how='left')
+                   .reindex(product_sku.index)
+                   ['recon_brand']
+                  )
+
+    return recon_brand
