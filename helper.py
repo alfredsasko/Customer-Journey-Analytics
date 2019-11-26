@@ -14,6 +14,11 @@ from google.cloud import bigquery
 
 import numpy as np
 import pandas as pd
+
+import nltk
+# nltk.download(['wordnet', 'stopwords'])
+STOPWORDS = nltk.corpus.stopwords.words('english')
+
 from scipy import stats
 import statsmodels.api as sm
 from statsmodels.formula.api import ols
@@ -21,6 +26,13 @@ import scikit_posthocs as sp
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.model_selection import GridSearchCV
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.naive_bayes import ComplementNB
+from sklearn.metrics import f1_score
 
 from matplotlib import pyplot as plt
 import seaborn as sns
@@ -273,24 +285,25 @@ def get_missmatch(**kws):
 
     return cross_tab, missmatch_rows, total_missmatch
 
-def reconstruct_brand(product_sku, client, query_params):
-    '''Reconstructs brand from product name and brand variables
+def query_product_info(client, query_params):
+    '''Query product information from bigquery database.
+    Distinct records of product_sku, product_name,
+    product_brand, product_brand_grp,
+    product_category, product_category_grp,
     Args:
-        product_sku: product_sku as series of size (# transactions, 2)
         client: Instatiated bigquery.Client to query distinct product
-                description(product_sku, product_name, product_brand,
-                product_brand_grp)
+                description(product_sku, product_name, product_category,
+                product_category_grp)
         query_params: Query parameters for client
-
     Returns:
-        recon_brand: reconstructed brand column as pandas dataframe
-                     of shape (# transactions, ['product_sku', 'recon_brand'])
+        product_df: product information as distict records
+                    as pandas dataframe (# records, # variables)
     '''
 
     # Check arguments
     # ----------------
-    assert isinstance(product_sku,  pd.Series)
     assert isinstance(client, bigquery.Client)
+    assert isinstance(query_params, list)
 
     # Query distinct products descriptions
     # ------------------------------------
@@ -299,13 +312,15 @@ def reconstruct_brand(product_sku, client, query_params):
         hits_product.productSku AS product_sku,
         hits_product.v2productName AS product_name,
         hits_product.productBrand AS product_brand,
-        hits.contentGroup.contentGroup1 AS product_brand_grp
+        hits.contentGroup.contentGroup1 AS product_brand_grp,
+        hits_product.v2productCategory AS product_category,
+        hits.contentGroup.contentGroup2 AS product_category_grp
     FROM
         `bigquery-public-data.google_analytics_sample.ga_sessions_*`
         LEFT JOIN UNNEST(hits) AS hits
         LEFT JOIN UNNEST(hits.product) AS hits_product
     WHERE
-        _TABLE_SUFFIX BETWEEN @start_date AND @end_date
+    _TABLE_SUFFIX BETWEEN @start_date AND @end_date
         AND hits_product.productSku IS NOT NULL
     ORDER BY
         product_sku
@@ -315,6 +330,21 @@ def reconstruct_brand(product_sku, client, query_params):
     job_config.query_parameters = query_params
     df = client.query(query, job_config=job_config).to_dataframe()
 
+    return df
+
+def reconstruct_brand(product_sku, df):
+    '''Reconstructs brand from product name and brand variables
+    Args:
+        product_sku: product_sku as of transaction records on product level
+                     of size # transactions on produc level
+        df: Product information as output of
+            helper.query_product_info in form of dataframe
+            of shape (# of distinct records, # of variables)
+
+    Returns:
+        recon_brand: reconstructed brand column as pandas series
+                     of size # of transactions
+    '''
 
     # predict brand name from product name for each sku
     # -------------------------------------------------
@@ -419,7 +449,235 @@ def reconstruct_brand(product_sku, client, query_params):
                            on='product_sku',
                            how='left')
                    .reindex(product_sku.index)
-                   ['recon_brand']
-                  )
+                   ['recon_brand'])
 
     return recon_brand
+
+def reconstruct_category(product_sku, df, category_spec):
+    '''Reconstructs category from category variables and product names.
+
+    Args:
+        product_sku: product_sku from transaction records on product level
+                     of size # transactions on product level
+        df: Product information as output of
+            helper.query_product_info in form of dataframe
+            of shape (# of distinct records, # of variables)
+
+        category_spec: Dictionary with keys as category variable names
+                       and values as mappings between category variable levels
+                       to category labels in form of dataframe
+
+    Returns:
+        recon_category: reconstructed category column as pandas series
+                        of size # of trasactions on product level
+        category_df: mappings of unique sku to category labels
+    '''
+
+    # Check arguments
+    # ----------------
+    assert isinstance(product_sku,  pd.Series)
+    assert isinstance(df, pd.DataFrame)
+    assert isinstance(category_spec, dict)
+
+    # reconstruct category name from product name for each sku
+    # --------------------------------------------------------
+
+    def get_category_representation(category_label, valid_categories):
+        '''Handle multiple categories assigned to one sku.
+        For ambigious categories returns missing value.
+
+        Args:
+            category_label: Series of category labels for
+                            particular sku
+            valid_categories: Index of valid unique categories
+        Returns:
+            label: valid category label or missing value
+        '''
+        label = valid_categories[valid_categories.isin(category_label)]
+        if label.empty or label.size > 1:
+            return np.nan
+        else:
+            return label[0]
+
+
+    def label_category_variable(df, category_var, label_spec):
+        '''reconstruct category labels from category variable.
+
+        Args:
+            df: Product information dataframe.
+            category_var: Name of category variabel to reconstruct labels
+            label_spec: Label mapping between category variable levels
+                        and labels.
+
+        Returns:
+            var_label: Label mapping to sku as dataframe
+
+        '''
+
+        valid_categories = pd.Index(label_spec
+                                    .groupby(['category_label'])
+                                    .groups
+                                    .keys())
+
+        var_label = (pd.merge(df[['product_name', category_var]]
+                                .drop_duplicates(),
+                                label_spec,
+                                how='left',
+                                on=category_var)
+                     [['product_name', 'category_label']]
+                     .groupby('product_name')
+                     ['category_label']
+                     .apply(get_category_representation,
+                            valid_categories=valid_categories)
+                     .reset_index())
+
+        return var_label
+
+    def screen_fit_model(data):
+        '''Screens Naive Bayes Classifiers and selects best model
+        based on f1 weigted score. Returns fitted model and score.
+
+        Args:
+            data: Text and respective class labels as dataframe
+                  of shape (# samples, [text, labels])
+
+        Returns:
+            model: Best fitted sklearn model
+            f1_weighted_score: Test f1 weighted score
+
+        Note: Following hyperparameters are tested
+              Algorithm: MultinomialNB, ComplementNB
+              ngrams range: (1, 1), (1, 2), (1, 3)
+              binarization: False, True
+        '''
+
+        # vectorize text inforomation in product_name
+        def preprocessor(text):
+            # not relevant words
+            not_relevant_words = ['google',
+                                  'youtube',
+                                  'waze',
+                                  'android']
+
+            # transform text to lower case and remove punctuation
+            text = ''.join([word.lower() for word in text
+                            if word not in string.punctuation])
+
+            # tokenize words
+            tokens = re.split('\W+', text)
+
+            # Drop not relevant words and lemmatize words
+            wn = nltk.WordNetLemmatizer()
+            text = ' '.join([wn.lemmatize(word) for word in tokens
+                    if word not in not_relevant_words + STOPWORDS])
+
+            return text
+
+        # define pipeline
+        pipe = Pipeline([('vectorizer', CountVectorizer()),
+                         ('classifier', None)])
+
+        # define hyperparameters
+        param_grid = dict(vectorizer__ngram_range=[(1, 1), (1, 2), (1, 3)],
+                          vectorizer__binary=[False, True],
+                          classifier=[MultinomialNB(),
+                                      ComplementNB()])
+
+        # screen naive buyes models
+        grid_search = GridSearchCV(pipe, param_grid=param_grid, cv=5,
+                                   scoring='f1_weighted', n_jobs=-1)
+
+        # devide dataset to train and test set using stratification
+        # due to high imbalance of lables frequencies
+        x_train, x_test, y_train, y_test = train_test_split(
+            data['product_name'],
+            data['recon_category'],
+            test_size=0.25,
+            stratify=data['recon_category'],
+            random_state=1)
+
+        # execute screening and select best model
+        grid_search.fit(x_train, y_train)
+
+        # calculate f1 weighted test score
+        y_pred = grid_search.predict(x_test)
+        f1_weigted_score = f1_score(y_test, y_pred, average='weighted')
+
+        return grid_search.best_estimator_, f1_weigted_score
+
+    # reconstruct category label from cateogry variables
+    recon_labels = dict()
+    for var, label_spec in category_spec.items():
+        recon_labels[var] = (label_category_variable(df, var, label_spec)
+                             .set_index('product_name'))
+
+    recon_labels['product_category'][
+        recon_labels['product_category'].isna()
+    ] = recon_labels['product_category_grp'][
+        recon_labels['product_category'].isna()
+    ]
+
+    # reconstruct category label from produc names
+    valid_categories = pd.Index(category_spec['product_category_grp']
+                        .groupby(['category_label'])
+                        .groups
+                        .keys())
+
+    category_df = (pd.merge(df[['product_sku', 'product_name']]
+                            .drop_duplicates(),
+                            recon_labels['product_category'],
+                            how='left',
+                            on = 'product_name')
+                   [['product_sku', 'product_name', 'category_label']]
+                   .groupby('product_sku')
+                   .agg({'product_name': lambda name: name.str.cat(sep=' '),
+                         'category_label': lambda label:
+                         get_category_representation(label, valid_categories)})
+                   .reset_index())
+
+    category_df.rename(columns={'category_label': 'recon_category'},
+                       inplace=True)
+
+    # associate category from category names and variables on transaction data
+    # ------------------------------------------------------------------------
+    recon_category = (pd.merge(product_sku.to_frame(),
+                           category_df[['product_sku', 'recon_category']],
+                           on='product_sku',
+                           how='left')
+                  )
+
+    # predict category of transactions where category is unknown
+    # Multinomial and Complement Naive Bayes model is screened
+    # and finetuned using 1-grams, 2-grams and 3-grams
+    # as well as binarization (Tru or False)
+    # best model is selected based on maximizing test f1 weigted score
+    # ----------------------------------------------------------------
+
+    # screen best model and fit it on training data
+    model, f1_weighted_score = screen_fit_model(
+        category_df[['product_name', 'recon_category']]
+        .dropna()
+        )
+
+    # predict category labels if model has f1_weighted_score > threshold
+    f1_weighted_score_threshold = 0.8
+    if f1_weighted_score < f1_weighted_score_threshold:
+        raise Exception(
+        'Accuracy of category prediction below threshold {:.2f}'
+        .format(f1_weighted_score_threshold))
+    else:
+        product_name = (pd.merge(recon_category
+                               .loc[recon_category['recon_category'].isna(),
+                                    ['product_sku']],
+                               category_df[['product_sku', 'product_name']],
+                               how='left',
+                               on='product_sku')
+                      ['product_name'])
+
+        category_label = model.predict(product_name)
+        recon_category.loc[recon_category['recon_category'].isna(),
+                       'recon_category'] = category_label
+
+    return recon_category['recon_category'], pd.concat(
+        [product_name, pd.Series(category_label, index=product_name.index)]
+        , axis=1)
