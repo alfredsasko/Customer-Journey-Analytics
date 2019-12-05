@@ -8,6 +8,7 @@ Module serves for custom methods to support Customer Journey Analytics Project
 # Standard libraries
 import re
 import ipdb
+import string
 
 # 3rd party libraries
 from google.cloud import bigquery
@@ -678,6 +679,217 @@ def reconstruct_category(product_sku, df, category_spec):
         recon_category.loc[recon_category['recon_category'].isna(),
                        'recon_category'] = category_label
 
-    return recon_category['recon_category'], pd.concat(
-        [product_name, pd.Series(category_label, index=product_name.index)]
-        , axis=1)
+    return recon_category['recon_category']
+
+def reconstruct_sales_region(subcontinent):
+    '''Reconstruct sales region from subcontinent'''
+
+    if (pd.isna(subcontinent)
+        or subcontinent.lower() == '(not set)'):
+        sales_region = np.nan
+
+    elif ('africa' in subcontinent.lower()
+          or 'europe' in subcontinent.lower()):
+        sales_region = 'EMEA'
+
+    elif ('caribbean' in subcontinent.lower()
+          or subcontinent.lower() == 'central america'):
+        sales_region = 'Central America'
+
+    elif subcontinent.lower() == 'northern america':
+        sales_region = 'North America'
+
+    elif subcontinent.lower() == 'south america':
+        sales_region = 'South America'
+
+    elif ('asia' in subcontinent.lower()
+          or subcontinent.lower() == 'australasia'):
+        sales_region = 'APAC'
+
+    else:
+        raise Exception(
+            'Can not assign sales region to {} subcontinent'
+            .format(subcontinent))
+
+    return sales_region
+
+def reconstruct_traffic_keyword(text):
+    '''Reconstructs traffic keywords to more simple representation'''
+
+    if pd.isna(text):
+        text = '(not applicable)'
+
+    elif ((text != '(not provided)')
+          and (re.search('(\s+)', text) is not None)):
+
+            # transform text to lower case and remove punctuation
+            text = ''.join([word.lower() for word in text
+                            if word not in string.punctuation.replace('/', '')])
+
+            # tokenize words
+            tokens = re.split('\W+|/', text)
+
+            # Drop not relevant words and lemmatize words
+            wn = nltk.WordNetLemmatizer()
+            text = ' '.join([wn.lemmatize(word) for word in tokens
+                    if word not in STOPWORDS])
+
+    return text
+
+
+def aggregate_data(df):
+    '''Encode and aggregate engineered and missing value free data
+    on client level
+
+    Args:
+        df: engineered and missing value free data as
+            pandas dataframe of shape (# transaction items, # variables)
+
+        agg_df: encoded and aggregated dataframe
+                of shape(# clients, # encoded & engineered variables)
+                with client_id index
+    '''
+    # identifiers
+    id_vars = pd.Index(
+        ['client_id',
+         'session_id',
+         'transaction_id',
+         'product_sku']
+    )
+
+    # session variables
+    session_vars = pd.Index(
+        ['visit_number',           # avg_visits
+         'date',                   # month, week, week_day + one hot encode + sum
+         'pageviews',              # avg_pageviews
+         'time_on_site',           # avg_time_on_site
+         'ad_campaign',            # sum
+         'source',                 # one hot encode + sum
+         'traffic_keyword',        # one hot encode + sum
+         'browser',                # one hot encode + sum
+         'operating_system',       # one hot encode + sum
+         'device_category',        # one hot encode + sum
+         'continent',              # one hot encode + sum
+         'subcontinent',           # one hot encode + sum
+         'country',                # one hot encode + sum
+         'sales_region',           # one hot encode + sum
+         'social_referral',        # sum
+         'social_network',         # one hot encode + sum
+         'channel_group']          # one hot encode + sum
+    )
+
+    # group session variables from item to session level
+    session_df = (df[['client_id',
+                      'session_id',
+                      *session_vars.to_list()]]
+                  .drop_duplicates()
+
+                   # drop ambigious region 1 case
+                  .drop_duplicates(subset='session_id'))
+
+    # reconstruct month, weeek and week day variables
+    session_df['month'] = session_df['date'].dt.month
+    session_df['week'] = session_df['date'].dt.week
+    session_df['week_day'] = session_df['date'].dt.weekday + 1
+    session_df = session_df.drop(columns='date')
+
+    # encode variables on session level
+    keep_vars = [
+        'client_id',
+        'session_id',
+        'visit_number',
+        'pageviews',
+        'time_on_site',
+        'social_referral',
+        'ad_campaign'
+    ]
+
+    encode_vars = session_df.columns.drop(keep_vars)
+    enc_session_df = pd.get_dummies(session_df,
+                                    columns=encode_vars.to_list(),
+                                    prefix_sep='*')
+
+    # remove not relevant encoded variables
+    enc_session_df = enc_session_df.drop(
+        columns=enc_session_df.columns[
+            enc_session_df.columns.str.contains('not set|other')
+        ]
+    )
+
+    # summarize session level variables on customer level
+    sum_vars = (pd.Index(['social_referral', 'ad_campaign'])
+                .append(enc_session_df
+                        .columns
+                        .drop(keep_vars)))
+
+    client_session_sum_df = (enc_session_df
+                             .groupby('client_id')
+                             [sum_vars]
+                             .sum())
+
+    client_session_avg_df = (
+        enc_session_df
+        .groupby('client_id')
+        .agg(avg_visits=('visit_number', 'mean'),
+             avg_pageviews=('pageviews', 'mean'),
+             avg_time_on_site=('time_on_site', 'mean'))
+    )
+
+    client_session_df = pd.concat([client_session_avg_df,
+                                   client_session_sum_df],
+                                  axis=1)
+
+
+    # product level variables
+    product_vars = pd.Index([
+        'product_category',        # one hot encode + sum
+        'product_price',           # avg_product_revenue
+        'product_quantity',        # avg_product_revenue
+        'hour']                    # one hot encoded + sum
+    )
+
+    avg_vars = pd.Index([
+        'product_price',
+        'product_quantity'
+    ])
+
+    sum_vars = pd.Index([
+        'product_category',
+        'hour'
+    ])
+
+    enc_product_df = pd.get_dummies(df[id_vars.union(product_vars)],
+                                    columns=sum_vars,
+                                    prefix_sep='*')
+
+    # summarize product level variables on customer level
+    client_product_sum_df = (enc_product_df
+                             .groupby('client_id')
+                             [enc_product_df.columns.drop(avg_vars)]
+                             .sum())
+
+    def average_product_vars(client):
+        d = {}
+        d['avg_product_revenue'] = ((client['product_price']
+                                     * client['product_quantity'])
+                                    .sum()
+                                    / client['product_quantity'].sum())
+
+        d['unique_products'] = len(client['product_sku'].unique())
+
+        return pd.Series(d, index=['avg_product_revenue',
+                                   'unique_products'])
+
+    client_product_avg_df = (enc_product_df
+                             .groupby('client_id')
+                             .apply(average_product_vars))
+
+    client_product_df = pd.concat([client_product_avg_df,
+                                   client_product_sum_df]
+                                  , axis=1)
+
+    agg_df = pd.concat([client_session_df,
+                        client_product_df],
+                       axis=1)
+
+    return agg_df
