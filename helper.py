@@ -9,6 +9,7 @@ Module serves for custom methods to support Customer Journey Analytics Project
 import re
 import ipdb
 import string
+import math
 
 # 3rd party libraries
 from google.cloud import bigquery
@@ -34,6 +35,15 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.naive_bayes import ComplementNB
 from sklearn.metrics import f1_score
+from sklearn.decomposition import PCA
+
+import rpy2
+import rpy2.rlike.container as rlc
+from rpy2 import robjects
+from rpy2.robjects.vectors import FloatVector
+from rpy2.robjects.vectors import ListVector
+from rpy2.robjects.vectors import StrVector
+from rpy2.robjects import pandas2ri
 
 from matplotlib import pyplot as plt
 import seaborn as sns
@@ -716,8 +726,13 @@ def reconstruct_sales_region(subcontinent):
 def reconstruct_traffic_keyword(text):
     '''Reconstructs traffic keywords to more simple representation'''
 
+    # if empty rename to not applicable
     if pd.isna(text):
         text = '(not applicable)'
+
+    # if one word with mixed numbers & letters rename to (not relevant)
+    elif re.search(r'(?=.*\d)(?=.*[A-Z=\-])(?=.*[a-z])([\w=-]+)', text):
+        text = '(not relevant)'
 
     elif ((text != '(not provided)')
           and (re.search('(\s+)', text) is not None)):
@@ -765,7 +780,6 @@ def aggregate_data(df):
          'time_on_site',           # avg_time_on_site
          'ad_campaign',            # sum
          'source',                 # one hot encode + sum
-         'traffic_keyword',        # one hot encode + sum
          'browser',                # one hot encode + sum
          'operating_system',       # one hot encode + sum
          'device_category',        # one hot encode + sum
@@ -788,8 +802,8 @@ def aggregate_data(df):
                   .drop_duplicates(subset='session_id'))
 
     # reconstruct month, weeek and week day variables
-    session_df['month'] = session_df['date'].dt.month
-    session_df['week'] = session_df['date'].dt.week
+    # session_df['month'] = session_df['date'].dt.month
+    # session_df['week'] = session_df['date'].dt.week
     session_df['week_day'] = session_df['date'].dt.weekday + 1
     session_df = session_df.drop(columns='date')
 
@@ -842,6 +856,7 @@ def aggregate_data(df):
 
     # product level variables
     product_vars = pd.Index([
+        'product_name',            # one hot encode + sum
         'product_category',        # one hot encode + sum
         'product_price',           # avg_product_revenue
         'product_quantity',        # avg_product_revenue
@@ -854,6 +869,7 @@ def aggregate_data(df):
     ])
 
     sum_vars = pd.Index([
+        'product_name',
         'product_category',
         'hour'
     ])
@@ -875,10 +891,15 @@ def aggregate_data(df):
                                     .sum()
                                     / client['product_quantity'].sum())
 
-        d['unique_products'] = len(client['product_sku'].unique())
+        # ipdb.set_trace(context=15)
+        d['avg_unique_products'] = (client
+                                    .groupby('transaction_id')
+                                    ['product_sku']
+                                    .apply(lambda sku: len(sku.unique()))
+                                    .mean())
 
         return pd.Series(d, index=['avg_product_revenue',
-                                   'unique_products'])
+                                   'avg_unique_products'])
 
     client_product_avg_df = (enc_product_df
                              .groupby('client_id')
@@ -893,3 +914,396 @@ def aggregate_data(df):
                        axis=1)
 
     return agg_df
+
+
+def do_pca(X_std, **kwargs):
+    '''# Apply PCA to the data.'''
+    pca = PCA(**kwargs)
+    model = pca.fit(X_std)
+    X_pca = model.transform(X_std)
+    return pca, X_pca
+
+def scree_pca(pca, plot=False, **kwargs):
+    '''Investigate the variance accounted for by each principal component.'''
+    # PCA components
+    n_pcs = len(pca.components_)
+    pcs = pd.Index(range(1, n_pcs+1),  name='principal component')
+
+    # Eigen Values
+    eig = pca.explained_variance_.reshape(n_pcs, 1)
+    eig_df = pd.DataFrame(np.round(eig, 2), columns=['eigen_value'], index=pcs)
+    eig_df['cum_eigen_value'] = np.round(eig_df['eigen_value'].cumsum(), 2)
+
+    # Explained Variance %
+    var = pca.explained_variance_ratio_.reshape(n_pcs, 1)
+    var_df = pd.DataFrame(np.round(var, 4),
+                          columns=['explained_var'],
+                          index=pcs)
+    var_df['cum_explained_var'] = (np.round(var_df['explained_var'].cumsum()
+                                   / var_df['explained_var'].sum(), 4))
+
+    df = pd.concat([eig_df, var_df], axis=1)
+
+    if plot:
+        # scree plot limit
+        limit = pd.DataFrame(np.ones((n_pcs, 1)),
+                             columns=['scree_plot_limit'], index=pcs)
+
+        ax = (pd.concat([df, limit], axis=1)
+              .plot(y=['eigen_value', 'explained_var', 'scree_plot_limit'],
+                    title='PCA: Scree test & Variance Analysis', **kwargs)
+             )
+        df.plot(y=['cum_explained_var'], secondary_y=True, ax=ax)
+
+    return df
+
+def get_pc_num(scree_df, pc_num = None, exp_var_threshold=None,
+               eig_val_threshold=1):
+    '''
+    Selects optimum number of prinipal components according specified ojectives
+    wheter % of explained variance or eig_val criterion
+
+    Args:
+        scree_df: Dataframe as ouptu of scree_pca function
+        exp_var_threshold: threshold for cumulative % of epxlained variance
+        eig_val_threshold: min eigen value, 1 by default
+
+    Returns:
+        pc_num: Number of selelected principal components
+        exp_var: Explained variance by selected components
+        sum_eig: Sum of eigen values of selected components
+    '''
+    # check arguments
+    assert pc_num is None or pc_num <= scree_df.index.size
+    assert exp_var_threshold is None or (0 < exp_var_threshold <= 1)
+    assert 0 < eig_val_threshold < scree_df.index.size
+
+    assert (pc_num is None or exp_var_threshold is not None) or \
+           (pc_num is not None or exp_var_threshold is None), \
+           ('''Either number of principal components or minimum variance
+             explained should be selected''')
+
+    if exp_var_threshold:
+        pcs = scree_df.index[scree_df['cum_explained_var'] <= exp_var_threshold]
+
+    elif pc_num:
+        pcs = scree_df.index[range(1, pc_num+1)]
+
+    elif exp_var_threshold is None:
+        pcs = scree_df.index[scree_df['eigen_value'] > eig_val_threshold]
+
+    pc_num = len(pcs)
+    exp_var = scree_df.loc[pc_num, 'cum_explained_var']
+    sum_eig = scree_df.loc[[*pcs], 'eigen_value'].sum()
+
+    return pc_num, exp_var, sum_eig
+
+def varimax(factor_df, **kwargs):
+    '''
+    varimax rotation of factor matrix
+
+    Args:
+        factor_df: factor matrix as pd.DataFrame with shape
+                   (# features, # principal components)
+
+    Return:
+        rot_factor_df: rotated factor matrix as pd.DataFrame
+    '''
+    factor_mtr = df2mtr(factor_df)
+    varimax = robjects.r['varimax']
+    rot_factor_mtr = varimax(factor_mtr)
+    return pandas2ri.ri2py(rot_factor_mtr.rx2('loadings'))
+
+def get_components(df, pca, rotation=None, sort_by='sig_ld',
+                   feat_details=None, plot='None', **kwargs):
+    '''
+    Show significant factor loadings depending on sample size
+
+    Args:
+        df: data used for pca as pd.DataFrame
+        pca: fitted pca object
+        rotation: if to apply factor matrix rotation, by default None.
+        sort_by: sort sequence of components, by default accoring
+                number of significant loadings 'sig_load'
+        feat_details: Dictionary of mapped feature detials, by default None
+        plot: 'discrete' plots heatmap enhancing sifinigicant laodings
+              'continuous' plots continous heatmap,
+              by default None
+
+    Returns:
+        factor_df: factor matrix as pd.DataFrame
+                   of shape (# features, # components)
+        sig_ld: number of significant loadings across components as
+                pd. Series of size # components
+        cross_ld: number of significant loadings across features
+                 (cross loadings)  as pd. Series of size # features
+
+    '''
+    # constants
+    # ---------
+    maxstr = 100    # amount of the characters to print
+
+    # guidelines for indentifying significant factor loadings
+    # based on sample size. Source: Multivariate Data Analysis. 7th Edition.
+    factor_ld = np.linspace(0.3, 0.75, 10)
+    signif_sz = np.array([350, 250, 200, 150, 120, 100, 85, 70, 60, 50])
+
+    # loadings significant treshold
+    ld_sig = factor_ld[len(factor_ld) - (signif_sz <= df.index.size).sum()]
+
+    if rotation == 'varimax':
+        components = varimax(pd.DataFrame(pca.components_.T))
+    else:
+        components = pca.components_.T
+
+    # annotate factor matrix
+    index = pd.Index([])
+    for feat in df.columns:
+        try:
+            index = index.append(
+                pd.Index([feat]) if feat_details is None else \
+                pd.Index([feat_details[feat]['long_name'][:maxstr]]))
+        except KeyError:
+            index = index.append(pd.Index([feat]))
+
+    factor_df = pd.DataFrame(
+        np.round(components, 2),
+        columns = pd.Index(range(1, components.shape[1]+1),
+                           name='principal_components'),
+        index = index.rename('features')
+    )
+
+    # select significant loadings
+    sig_mask = (factor_df.abs() >= ld_sig)
+
+    # calculate cross loadings
+    cross_ld = (sig_mask.sum(axis=1)
+                .sort_values(ascending=False)
+                .rename('cross_loadings'))
+
+    # calculate number of significant loadings per component
+    sig_ld = (sig_mask.sum()
+              .sort_values(ascending=False)
+              .rename('significant_loadings'))
+
+    # sort vactor matrix by loadings in components
+    sort_by = [*sig_ld.index] if sort_by == 'sig_ld' else sort_by
+    factor_df.sort_values(sort_by, ascending=False, inplace=True)
+
+    if plot == 'continuous':
+        plt.figure(**kwargs)
+        sns.heatmap(
+            factor_df.sort_values(sort_by, ascending=False).T,
+            cmap='RdYlBu', vmin=-1, vmax=1, square=True
+        )
+        plt.title('Factor matrix')
+
+    elif plot == 'discrete':
+        # loadings limits
+        ld_min, ld_sig_low, ld_sig_high, ld_max = -1, -ld_sig, ld_sig, 1
+        vmin, vmax = ld_min, ld_max
+
+        # create descrete scale to distingish sifnificant diffrence categories
+        data = factor_df.apply(
+            lambda col: pd.to_numeric(pd.cut(col,
+                                             [ld_min, -ld_sig, ld_sig, ld_max],
+                                             labels=[-ld_sig, 0, ld_sig])))
+
+        # plot heat map
+        fig = plt.figure(**kwargs)
+        sns.heatmap(data.T, cmap='viridis', vmin=vmin, vmax=vmax, square=True)
+        plt.title('Factor matrix with significant laodings: {} > loading > {}'
+                 .format(-ld_sig, ld_sig));
+
+    return factor_df, sig_ld, cross_ld
+
+def df2mtr(df):
+    '''
+    Convert pandas dataframe to r matrix. Category dtype is casted as
+    factorVector considering missing values
+    (original py2ri function of rpy2 can't handle this properly so far)
+
+    Args:
+        data: pandas dataframe of shape (# samples, # features)
+              with numeric dtype
+
+    Returns:
+        mtr: r matrix of shape (# samples # features)
+    '''
+    # check arguments
+    assert isinstance(df, pd.DataFrame), 'Argument df need to be a pd.Dataframe.'
+
+    # select only numeric columns
+    df = df.select_dtypes('number')
+
+    # create and return r matrix
+    values = FloatVector(df.values.flatten())
+    dimnames = ListVector(
+        rlc.OrdDict([('index', StrVector(tuple(df.index))),
+        ('columns', StrVector(tuple(df.columns)))])
+    )
+
+    return robjects.r.matrix(values, nrow=len(df.index), ncol=len(df.columns),
+                             dimnames = dimnames, byrow=True)
+
+def screen_model(X_train, X_test, y_train, y_test, grid_search, fine_param=None,
+                 title='MODEL SCREENING EVALUATION', verbose='text'):
+    '''Screen pipeline with diffrent hyperparameters.
+
+    Args:
+        X_train, X_test: Pandas DataFrame of shape (# samples, # features)
+                         _train - training set, _test - test set
+        y_train, y_test: Pandas Series of size (# of samples, label)
+        grid_search: GridSearchCV object
+        verbose: 'text' shows grid_search results DataFrame
+                 'plot' shows scores run chart with fine_param
+       fine_param: name of the parameter to fine tune model. Used only with
+                   'plot' option
+
+    Returns:
+        grid_search: fitted the grid_search object
+
+    '''
+    # screen models
+    grid_search.fit(X_train, y_train)
+
+    # print output
+    if verbose == 'text':
+        # screen results
+        screen_results = (pd.DataFrame(grid_search.cv_results_)
+                             .sort_values('rank_test_score'))
+
+        hyper_params = screen_results.columns[
+            screen_results.columns.str.contains('param_')
+        ]
+
+        if 'param_classifier' in screen_results:
+            screen_results['param_classifier'] = (
+                screen_results['param_classifier']
+                .apply(lambda cls_: type(cls_).__name__)
+            )
+
+        screen_results['overfitting'] = (
+            screen_results['mean_train_score']
+            - screen_results['mean_test_score']
+        )
+
+        # calculate f1 weighted test score
+        y_pred = grid_search.predict(X_test)
+
+        f1_weighted_score = f1_score(y_test, y_pred, average='weighted')
+
+        # print results
+        print(title + '\n' + '-' * len(title))
+
+        display(screen_results
+                [hyper_params.union(pd.Index(['mean_train_score',
+                                              'std_train_score',
+                                              'mean_test_score',
+                                              'std_test_score',
+                                              'mean_fit_time',
+                                              'mean_score_time',
+                                              'overfitting']))])
+
+        print('Best model is {} with F1 test weighted score {:.3f}\n'
+              .format(type(grid_search
+                           .best_estimator_
+                           .named_steps
+                           .classifier)
+                      .__name__,
+                      f1_weighted_score))
+
+    elif verbose == 'plot':
+        if fine_param in grid_search.cv_results_:
+
+            # screen results
+            screen_results = pd.DataFrame(grid_search.cv_results_)
+
+            # plot results
+            screen_results = pd.melt(
+                screen_results,
+                id_vars=fine_param,
+                value_vars=(screen_results.columns[
+                    screen_results.columns
+                    .str.contains(r'split\d_\w{4,5}_score', regex=True)
+                ]),
+                var_name='score_type',
+                value_name=grid_search.scoring
+            )
+
+            screen_results['score_type'] = screen_results['score_type'].replace(
+                regex=r'split\d_(\w{4,5}_score)', value=r'\1'
+            )
+
+            sns.lineplot(x=fine_param,
+                         y=grid_search.scoring,
+                         hue='score_type',
+                         data=screen_results,
+                         err_style='bars',
+                         ax=plt.gca(),
+                         marker='o',
+                         linestyle='dashed')
+            plt.gca().set_title(title);
+
+    return grid_search
+
+def plot_features_significance(estimator, X_std, y, feature_names, class_names,
+                               threshold = -np.inf, title=''):
+    '''Analyzes features significance of the estimator.
+
+    Args:
+        estimator: Sklearn estimator with coef_ or feature_improtances
+                   attribute
+        X_std: Standardized inputs as dataframe
+               of shape (# of samples, # of features)
+        y: Class labels as Series of size # of samples
+        feature_names: list/index of features names
+        class_names: list of class names
+        threshold: Filters only significant coeficients following
+                   |coeficient| <= threshold
+        title: title to put on each plot + class name will be added.
+    '''
+
+    assert ('coef_' in dir(estimator)
+            or 'feature_importances' in dir(estimator))
+
+    # get factor matrix
+    factor_matrix = pd.DataFrame(estimator.coef_ if 'coef_' in dir(estimator)
+                                 else estimator.feature_importances_,
+                                 index=estimator.classes_,
+                                 columns=feature_names)
+
+
+    cols = 2
+    rows = math.ceil(len(estimator.classes_) / cols)
+    fig, axes = plt.subplots(rows, cols,
+                             figsize=(10*cols, 10*rows),
+                             sharex=True);
+    plt.subplots_adjust(hspace=0.07, wspace=0.4)
+
+    for i, (ax, class_idx, class_name) in enumerate(
+        zip(axes.flatten(), estimator.classes_, class_names)):
+
+        # sort feature weigths and select features
+        sorted_coef = (factor_matrix
+                       .loc[class_idx]
+                       .abs()
+                       .sort_values(ascending=False))
+
+        selected_feats = sorted_coef[sorted_coef >= threshold].index
+
+        selected_coef = (factor_matrix
+                         .loc[class_idx, selected_feats]
+                         .rename('feature_weights'))
+
+        # calculate one-to-rest standardized average differences
+        selected_diff = ((X_std.loc[y == class_idx, selected_feats].mean()
+                         - X_std.loc[y != class_idx, selected_feats].mean())
+                         .rename('standardized one-to-rest avg difference'))
+
+        # print bar chars
+        selected_df = (pd.concat([selected_coef, selected_diff], axis=1)
+                       .sort_values('feature_weights'))
+
+        selected_df.plot.barh(ax=ax, legend=True if i==0 else False)
+        ax.set_title(title + ' ' + class_name)
