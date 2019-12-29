@@ -13231,8 +13231,7 @@ demographics, such as age, gender, or geography</p>
 
 <span class="c1"># Supply your service account key</span>
 <span class="n">service_account</span> <span class="o">=</span> <span class="n">pathlib</span><span class="o">.</span><span class="n">Path</span><span class="p">(</span>
-    <span class="p">(</span><span class="s1">&#39;C:/Users/Fredo/Google Drive/Knowledge Center&#39;</span>
-    <span class="s1">&#39;/Data Scientist Nanodegree/customer-journey-31622634430d.json&#39;</span><span class="p">)</span>
+    <span class="p">(</span><span class="s1">&#39;path/to/your/service/account/key&#39;</span><span class="p">)</span>
 <span class="p">)</span>
 
 <span class="c1"># Authenticate and initiate biqquery client</span>
@@ -21834,13 +21833,32 @@ Name: silhouette_score, dtype: float64</pre>
 </div><div class="inner_cell">
 <div class="text_cell_render border-box-sizing rendered_html">
 <h2 id="5.-Evaluation">5. Evaluation<a class="anchor-link" href="#5.-Evaluation">&#182;</a></h2><p>The purpose of this section is to assess if generalizability of the solution to the population.</p>
-<h3 id="5.1-Clusters-Stability">5.1 Clusters Stability<a class="anchor-link" href="#5.1-Clusters-Stability">&#182;</a></h3><p>Factors such as initial seed points, observation ordering can effect cluster membership in nonhierarchical clustering. To check the stability of the clusters, the dataset is sorted by monetary value and compared with the original 3 and 6 cluster solutions.Solutions are cross-tabulated for comparison of miss-matched cluster membership where the following rules are applied:
-| Cluster Stability     | Missmatch in %    |
-|-------------------    | ----------------  |
-| very stable           |     &lt;0-10&gt;        |
-| stable                |     (10-20&gt;       |
-| somewhat stable       |     (20-25&gt;       |
-| not stable            |       &gt;25         |</p>
+<h3 id="5.1-Clusters-Stability">5.1 Clusters Stability<a class="anchor-link" href="#5.1-Clusters-Stability">&#182;</a></h3><p>Factors such as initial seed points, observation ordering can effect cluster membership in nonhierarchical clustering. To check the stability of the clusters, the dataset is sorted by monetary value and compared with the original 3 and 6 cluster solutions.Solutions are cross-tabulated for comparison of miss-matched cluster membership where the following rules are applied:</p>
+<table>
+<thead><tr>
+<th>Cluster Stability</th>
+<th>Missmatch in %</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>very stable</td>
+<td>&lt;0-10&gt;</td>
+</tr>
+<tr>
+<td>stable</td>
+<td>(10-20&gt;</td>
+</tr>
+<tr>
+<td>somewhat stable</td>
+<td>(20-25&gt;</td>
+</tr>
+<tr>
+<td>not stable</td>
+<td>&gt;25</td>
+</tr>
+</tbody>
+</table>
 <p><strong><em>Note</em></strong>: Clusters numbers may not correspond to each other across different algorithms and differently sorted datasets. Therefore do not expect the highest numbers on the diagonal of the confusion matrix. Matching of the clusters needs to be doublechecked visually on scatterplots.</p>
 
 </div>
