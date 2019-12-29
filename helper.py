@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 import nltk
-# nltk.download(['wordnet', 'stopwords'])
+nltk.download(['wordnet', 'stopwords'])
 STOPWORDS = nltk.corpus.stopwords.words('english')
 
 from scipy import stats
@@ -856,7 +856,7 @@ def aggregate_data(df):
 
     # product level variables
     product_vars = pd.Index([
-        'product_name',            # one hot encode + sum
+        # 'product_name',            # one hot encode + sum
         'product_category',        # one hot encode + sum
         'product_price',           # avg_product_revenue
         'product_quantity',        # avg_product_revenue
@@ -869,7 +869,7 @@ def aggregate_data(df):
     ])
 
     sum_vars = pd.Index([
-        'product_name',
+        # 'product_name',
         'product_category',
         'hour'
     ])
@@ -1294,16 +1294,18 @@ def plot_features_significance(estimator, X_std, y, feature_names, class_names,
 
         selected_coef = (factor_matrix
                          .loc[class_idx, selected_feats]
-                         .rename('feature_weights'))
+                         .rename('feature weights'))
 
         # calculate one-to-rest standardized average differences
-        selected_diff = ((X_std.loc[y == class_idx, selected_feats].mean()
-                         - X_std.loc[y != class_idx, selected_feats].mean())
-                         .rename('standardized one-to-rest avg difference'))
+        selected_diff = (
+            (X_std.loc[y == class_idx, selected_feats].mean()
+             - X_std.loc[y != class_idx, selected_feats].mean())
+            .rename('standardized difference of one-to-rest everages')
+        )
 
         # print bar chars
         selected_df = (pd.concat([selected_coef, selected_diff], axis=1)
-                       .sort_values('feature_weights'))
+                       .sort_values('feature weights'))
 
         selected_df.plot.barh(ax=ax, legend=True if i==0 else False)
         ax.set_title(title + ' ' + class_name)
