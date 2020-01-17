@@ -40,7 +40,7 @@ There is 1 notebook available here to showcase work related to the above questio
 There are additional files:
  - `bigquery_.py` provides custom classes of BigqueryTable and BiqqueryDataset to query data to [Google Merchandise Store](https://www.googlemerchandisestore.com/) sample dataset.
  - `helper_py` provides custom functions for various analyses, to keep notebook manageable to read. 
- - `custom_pca.py` holds adaptation of [scikit-learn PCA class] including Varimax rotation and Latent Root criterion
+ - `custom_pca.py` holds adaptation of [scikit-learn PCA class](https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.PCA.html) including Varimax rotation and Latent Root criterion
  - `google_analytics_schema.xlsx` contains an analysis of variables in [Big Query Export Schema](https://support.google.com/analytics/answer/3437719?hl=en) used as a schema for Google Analytics Sample.
  - `product_categories.xlsx` ensures encoding of broken product category variables in the dataset
  - `temp.data.h5` stores codes/levels of each variable in the dataset
