@@ -13,7 +13,7 @@ Do you want to increase revenue and marketing ROI from your e-commerce platform?
 
 Customer journey mapping has become very popular in recent years. Making it right can upgrade marketing strategy, boost personalized branding and offerings and result in increased revenue and marketing ROI. To bring value to the business, it requires a healthy balance of qualitative knowledge of customer-facing functions about market and customers and quantitative insights, which can be gained from an e-commerce platform, CRM and other market related external sources. 
 
-The purpose of this project is to share with fellow sales, marketing professionals and data scientista how to approach quantitative part of customer journey mapping, namely answer questions:
+The purpose of this project is to share with fellow sales, marketing professionals and data scientists how to approach quantitative part of customer journey mapping, namely answer questions:
  1. How many buyer personas do we have?
  2. What are their unique characteristics?
  3. How accurately can we predict buyer persona from the first customer purchase transaction?
