@@ -23,3 +23,25 @@ The purpose of this project is to share with fellow sales, marketing professiona
  1. How to use hierarchical and non-hierarchical clustering to identify buyer personas?
  2. How to use ensemble and linear-based models to profile buyer personas characteristics?
  
+## Results<a name="results"></a>
+
+The main findings of the code can be found at the post available [here](TBD).
+
+## Installation <a name="installation"></a>
+
+There are several necessary 3rd party libraries beyond the Anaconda distribution of Python which needs to be installed and imported to run code. These are:
+ - [scikit_posthocs](https://scikit-posthocs.readthedocs.io/en/latest/) providing posthoc tests for multiple comparison
+ - [google cloud SDK](https://anaconda.org/conda-forge/google-cloud-sdk) providing access to BigQuerry and [Google Analytics Sample Dataset](https://support.google.com/analytics/answer/7586738?hl=en)
+ 
+## File Descriptions <a name="files"></a>
+
+There is 1 notebook available here to showcase work related to the above questions.  Markdown cells were used to assist in walking through the thought process for individual steps.  
+
+There are additional python files:
+ - `bigquery_.py` provides custom classes of BigqueryTable and BiqqueryDataset to query data to [Google Merchandise Store](https://www.googlemerchandisestore.com/)
+ 
+ - `helper_py` provides custom functions for various analyses, to keep notebook manageable to read. 
+ 
+## Licensing, Authors, Acknowledgements<a name="licensing"></a>
+
+Must give credit to Google for the data.  @alexisbcook for a nice introduction to [Nested and Repeated Data](https://www.kaggle.com/alexisbcook/nested-and-repeated-data). Daqing Chen, Sai Laing Sain & Kun Guo for their technical article [Data mining for the online retail industry: A case study of RFM model-based customer segmentation using data mining](https://link.springer.com/article/10.1057/dbm.2012.17)
