@@ -25,7 +25,7 @@ The purpose of this project is to share with fellow sales, marketing professiona
  
 ## Results<a name="results"></a>
 
-The main findings of the code can be found at the post available [here](TBD).
+The main findings of the code can be found at the post available [here](https://medium.com/@alfred.sasko/customer-journey-analytics-will-make-you-more-money-ba7a11cda063).
 
 ## Installation <a name="installation"></a>
 
